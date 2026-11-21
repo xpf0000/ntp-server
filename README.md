@@ -357,6 +357,10 @@ publishes `SHA256SUMS` with the archives. Each includes the daemon, both configu
 examples and MIT license. FlyEnv can select the release asset by OS and CPU and
 verify the SHA-256 before installing it.
 
+To recover an existing release, run the **CI** workflow from the default branch
+and enter its tag in `release_tag`. This builds the source at that tag,
+uploads missing assets, and preserves any archives already published.
+
 
 ## Configuration
 

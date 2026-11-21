@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag whose release assets to publish or repair
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -23,6 +28,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
       - uses: actions/setup-go@v7
         with:
@@ -50,48 +56,54 @@ jobs:
         run: go build ./cmd/ntp-server
 
   release:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: >-
+      (github.event_name == 'push' && github.ref_type == 'tag') ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.release_tag, 'v'))
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
     concurrency:
-      group: release-${{ github.ref_name }}
+      group: release-${{ inputs.release_tag || github.ref_name }}
       cancel-in-progress: false
     env:
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout tagged service source
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ format('refs/tags/{0}', inputs.release_tag || github.ref_name) }}
+          path: release-source
+
+      - name: Checkout release tools
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          path: release-tools
 
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26.x'
           cache: true
-          cache-dependency-path: go.mod
+          cache-dependency-path: release-source/go.mod
+
+      - name: Test release publisher
+        run: python3 -B release-tools/scripts/publish_release_test.py
 
       - name: Build six platform binaries
         shell: bash
-        run: bash scripts/build.sh "$RELEASE_TAG" dist/bin
+        working-directory: release-source
+        run: bash scripts/build.sh "$RELEASE_TAG" ../dist/bin
 
       - name: Package binaries and checksums
         shell: bash
-        run: bash scripts/package-release.sh dist/bin dist/release
+        working-directory: release-source
+        run: bash scripts/package-release.sh ../dist/bin ../dist/release
 
       - name: Publish GitHub release
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          assets=(dist/release/ntp-server-*.zip dist/release/SHA256SUMS)
-          draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
-          if [[ "$draft" == false ]]; then
-            echo "Release $RELEASE_TAG already published"
-          elif [[ "$draft" == true ]]; then
-            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-            gh release edit "$RELEASE_TAG" --draft=false
-          else
-            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes
-          fi
+        run: python3 -B release-tools/scripts/publish_release.py "$RELEASE_TAG" dist/release
