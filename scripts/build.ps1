@@ -15,7 +15,8 @@ $targets = @(
   @{ os = "linux"; arch = "arm64" },
   @{ os = "darwin"; arch = "amd64" },
   @{ os = "darwin"; arch = "arm64" },
-  @{ os = "windows"; arch = "amd64" }
+  @{ os = "windows"; arch = "amd64" },
+  @{ os = "windows"; arch = "arm64" }
 )
 
 foreach ($target in $targets) {

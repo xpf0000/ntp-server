@@ -1,4 +1,7 @@
 {
+  "clock": {
+    "mode": "real"
+  },
   "ntp": {
     "listenAddress": "0.0.0.0:12300",
     "workers": 32,
@@ -10,6 +13,7 @@
     "clientRateLimitBurst": 128,
     "globalRateLimitPerSecond": 500000,
     "globalRateLimitBurst": 120000,
+    "logRequests": false,
     "serveUnsynced": true,
     "unsyncedStratum": 16,
     "referenceID": "LOCL",
@@ -61,6 +65,7 @@
   },
   "runtime": {
     "gomaxprocs": 8,
-    "logLevel": "INFO"
+    "logLevel": "INFO",
+    "logFile": ""
   }
 }

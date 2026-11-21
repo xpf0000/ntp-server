@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"strings"
 )
 
 type Config struct {
+	Clock    ClockConfig    `json:"clock"`
 	NTP      NTPConfig      `json:"ntp"`
 	Policy   PolicyConfig   `json:"policy"`
 	Upstream UpstreamConfig `json:"upstream"`
@@ -28,6 +30,7 @@ type NTPConfig struct {
 	ClientRateLimitBurst      int     `json:"clientRateLimitBurst"`
 	GlobalRateLimitPerSecond  float64 `json:"globalRateLimitPerSecond"`
 	GlobalRateLimitBurst      int     `json:"globalRateLimitBurst"`
+	LogRequests               bool    `json:"logRequests"`
 	ServeUnsynced             bool    `json:"serveUnsynced"`
 	UnsyncedStratum           uint8   `json:"unsyncedStratum"`
 	ReferenceID               string  `json:"referenceID"`
@@ -76,6 +79,7 @@ type APIConfig struct {
 type RuntimeConfig struct {
 	GOMAXPROCS int    `json:"gomaxprocs"`
 	LogLevel   string `json:"logLevel"`
+	LogFile    string `json:"logFile,omitempty"`
 }
 
 func Default() Config {
@@ -85,6 +89,7 @@ func Default() Config {
 	}
 
 	return Config{
+		Clock: ClockConfig{Mode: ClockReal},
 		NTP: NTPConfig{
 			ListenAddress:             "0.0.0.0:12300",
 			Workers:                   workers,
@@ -224,6 +229,7 @@ func (c *Config) Normalize() {
 		c.API.ShutdownTimeoutMilli = 5000
 	}
 
+	c.Runtime.LogFile = strings.TrimSpace(c.Runtime.LogFile)
 	c.Runtime.LogLevel = strings.ToUpper(strings.TrimSpace(c.Runtime.LogLevel))
 	if c.Runtime.LogLevel == "" {
 		c.Runtime.LogLevel = "INFO"
@@ -234,8 +240,12 @@ func (c *Config) Normalize() {
 }
 
 func (c Config) Validate() error {
-	if c.NTP.ListenAddress == "" {
-		return errors.New("ntp.listenAddress is required")
+	clock, err := c.Clock.Resolve()
+	if err != nil {
+		return err
+	}
+	if err := validateListenAddress(c.NTP.ListenAddress, "udp", "ntp.listenAddress"); err != nil {
+		return err
 	}
 	if c.NTP.Workers <= 0 {
 		return errors.New("ntp.workers must be > 0")
@@ -258,11 +268,22 @@ func (c Config) Validate() error {
 	if c.Policy.DNS.LookupTimeoutMillis < 1 {
 		return errors.New("policy.dns.lookupTimeoutMillis must be >= 1")
 	}
-	if c.Upstream.Enabled && len(c.Upstream.Servers) == 0 {
+	if clock.Mode == ClockReal && c.Upstream.Enabled && len(c.Upstream.Servers) == 0 {
 		return errors.New("upstream.servers cannot be empty when upstream is enabled")
 	}
-	if c.API.Enabled && c.API.ListenAddress == "" {
-		return errors.New("api.listenAddress is required when api is enabled")
+	if c.API.Enabled {
+		return validateListenAddress(c.API.ListenAddress, "tcp", "api.listenAddress")
+	}
+	return nil
+}
+
+func validateListenAddress(address, network, field string) error {
+	_, port, err := net.SplitHostPort(address)
+	if err == nil {
+		_, err = net.LookupPort(network, port)
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
 }

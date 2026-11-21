@@ -17,18 +17,19 @@ import (
 )
 
 type Status struct {
-	NowUTC          time.Time `json:"nowUTC"`
-	ListenAddress   string    `json:"listenAddress"`
-	Workers         int       `json:"workers"`
-	Synced          bool      `json:"synced"`
-	Stratum         uint8     `json:"stratum"`
-	OffsetMillis    float64   `json:"offsetMillis"`
-	ReferenceID     string    `json:"referenceID"`
-	ReferenceTime   time.Time `json:"referenceTime"`
-	Upstream        string    `json:"upstream"`
-	LastSyncError   string    `json:"lastSyncError"`
-	ClientRateLimit float64   `json:"clientRateLimitPerSecond"`
-	GlobalRateLimit float64   `json:"globalRateLimitPerSecond"`
+	ClockMode       config.ClockMode `json:"clockMode"`
+	NowUTC          time.Time        `json:"nowUTC"`
+	ListenAddress   string           `json:"listenAddress"`
+	Workers         int              `json:"workers"`
+	Synced          bool             `json:"synced"`
+	Stratum         uint8            `json:"stratum"`
+	OffsetMillis    float64          `json:"offsetMillis"`
+	ReferenceID     string           `json:"referenceID"`
+	ReferenceTime   time.Time        `json:"referenceTime"`
+	Upstream        string           `json:"upstream"`
+	LastSyncError   string           `json:"lastSyncError"`
+	ClientRateLimit float64          `json:"clientRateLimitPerSecond"`
+	GlobalRateLimit float64          `json:"globalRateLimitPerSecond"`
 }
 
 type Server struct {
@@ -36,13 +37,15 @@ type Server struct {
 	logger  *slog.Logger
 	metrics *metrics.Counters
 
-	conn          *net.UDPConn
-	aclPolicy     *policy.CIDRPolicy
-	dnsPolicy     *policy.DNSPolicy
-	clientLimiter *ratelimit.KeyedLimiter
-	globalLimiter *ratelimit.TokenBucket
-	syncState     *syncState
-	defaults      ResponseDefaults
+	conn            *net.UDPConn
+	aclPolicy       *policy.CIDRPolicy
+	dnsPolicy       *policy.DNSPolicy
+	clientLimiter   *ratelimit.KeyedLimiter
+	globalLimiter   *ratelimit.TokenBucket
+	syncState       *syncState
+	clock           config.ClockSettings
+	simulatedSource SyncSnapshot
+	defaults        ResponseDefaults
 
 	readTimeout  time.Duration
 	writeTimeout time.Duration
@@ -53,6 +56,10 @@ type Server struct {
 }
 
 func NewServer(cfg config.Config, logger *slog.Logger, m *metrics.Counters) (*Server, error) {
+	clock, err := cfg.Clock.Resolve()
+	if err != nil {
+		return nil, err
+	}
 	addr, err := net.ResolveUDPAddr("udp", cfg.NTP.ListenAddress)
 	if err != nil {
 		return nil, fmt.Errorf("resolve listen address %q: %w", cfg.NTP.ListenAddress, err)
@@ -101,6 +108,7 @@ func NewServer(cfg config.Config, logger *slog.Logger, m *metrics.Counters) (*Se
 		),
 		globalLimiter: ratelimit.NewTokenBucket(cfg.NTP.GlobalRateLimitPerSecond, cfg.NTP.GlobalRateLimitBurst),
 		syncState:     newSyncState(defaultRef),
+		clock:         clock,
 		defaults: ResponseDefaults{
 			ServeUnsynced:    cfg.NTP.ServeUnsynced,
 			UnsyncedStratum:  cfg.NTP.UnsyncedStratum,
@@ -112,13 +120,24 @@ func NewServer(cfg config.Config, logger *slog.Logger, m *metrics.Counters) (*Se
 		readTimeout:  time.Duration(cfg.NTP.ReadTimeoutMillis) * time.Millisecond,
 		writeTimeout: time.Duration(cfg.NTP.WriteTimeoutMillis) * time.Millisecond,
 	}
+	if clock.Mode != config.ClockReal {
+		// Publish the configured clock as a local test reference on the wire.
+		s.simulatedSource = SyncSnapshot{
+			Synced:        true,
+			Stratum:       10,
+			ReferenceID:   ReferenceID("SIMU"),
+			ReferenceTime: s.servedTime(time.Now(), clock.Offset),
+			Offset:        clock.Offset,
+		}
+	}
 	return s, nil
 }
 
 func (s *Server) Start(parent context.Context) {
 	s.ctx, s.cancel = context.WithCancel(parent)
 
-	if s.cfg.Upstream.Enabled {
+	upstreamEnabled := s.clock.Mode == config.ClockReal && s.cfg.Upstream.Enabled
+	if upstreamEnabled {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -137,7 +156,8 @@ func (s *Server) Start(parent context.Context) {
 	s.logger.Info("NTP server started",
 		"listen", s.cfg.NTP.ListenAddress,
 		"workers", s.cfg.NTP.Workers,
-		"upstream_enabled", s.cfg.Upstream.Enabled,
+		"clock_mode", s.clock.Mode,
+		"upstream_enabled", upstreamEnabled,
 	)
 }
 
@@ -224,16 +244,16 @@ func (s *Server) workerLoop(workerID int) {
 			continue
 		}
 
-		snapshot := s.syncState.Snapshot()
+		snapshot := s.clockSnapshot()
 		if !snapshot.Synced && !s.cfg.NTP.ServeUnsynced {
 			continue
 		}
 
-		clockOffset := snapshot.Offset
+		transmittedAt := s.servedTime(time.Now(), snapshot.Offset)
 		response := BuildResponse(
 			request,
-			receivedAt.Add(clockOffset),
-			time.Now().UTC().Add(clockOffset),
+			s.servedTime(receivedAt, snapshot.Offset),
+			transmittedAt,
 			snapshot,
 			s.defaults,
 		)
@@ -249,6 +269,9 @@ func (s *Server) workerLoop(workerID int) {
 		}
 		s.metrics.IncResponses()
 		s.metrics.AddBytesOut(written)
+		if s.cfg.NTP.LogRequests {
+			s.logger.Info("NTP request answered", "client", addr.String(), "clock_mode", s.clock.Mode, "served_time", transmittedAt)
+		}
 	}
 }
 
@@ -261,7 +284,8 @@ func (s *Server) sendKissOfDeath(addr *net.UDPAddr, req []byte, now time.Time) {
 	if code == "" {
 		code = "RATE"
 	}
-	kod := BuildKissOfDeath(req, now, now, code)
+	served := s.servedTime(now, s.clock.Offset)
+	kod := BuildKissOfDeath(req, served, served, code)
 
 	if s.writeTimeout > 0 {
 		_ = s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
@@ -272,15 +296,32 @@ func (s *Server) sendKissOfDeath(addr *net.UDPAddr, req []byte, now time.Time) {
 	}
 }
 
+func (s *Server) clockSnapshot() SyncSnapshot {
+	if s.clock.Mode == config.ClockReal {
+		return s.syncState.Snapshot()
+	}
+	return s.simulatedSource
+}
+
+func (s *Server) servedTime(now time.Time, offset time.Duration) time.Time {
+	if s.clock.Mode == config.ClockFrozen {
+		return s.clock.FrozenTime
+	}
+	return now.UTC().Add(offset)
+}
+
 func (s *Server) Status() Status {
-	ss := s.syncState.Snapshot()
+	ss := s.clockSnapshot()
+	now := time.Now().UTC()
+	served := s.servedTime(now, ss.Offset)
 	return Status{
-		NowUTC:          time.Now().UTC().Add(ss.Offset),
+		ClockMode:       s.clock.Mode,
+		NowUTC:          served,
 		ListenAddress:   s.cfg.NTP.ListenAddress,
 		Workers:         s.cfg.NTP.Workers,
-		Synced:          ss.Synced,
+		Synced:          s.clock.Mode == config.ClockReal && ss.Synced,
 		Stratum:         s.effectiveStratum(ss),
-		OffsetMillis:    durationMillis(ss.Offset),
+		OffsetMillis:    durationMillis(served.Sub(now)),
 		ReferenceID:     strings.TrimSpace(string(ss.ReferenceID[:])),
 		ReferenceTime:   ss.ReferenceTime,
 		Upstream:        ss.Upstream,

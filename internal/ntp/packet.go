@@ -113,7 +113,10 @@ func ToTimestamp(t time.Time) uint64 {
 }
 
 func FromTimestamp(ts uint64) time.Time {
-	sec := int64(ts>>32) - ntpEpochOffset
+	// Interpret the seconds field in the NTP era nearest to the local clock.
+	pivot := time.Now().Unix() + ntpEpochOffset
+	delta := int64(int32(uint32(ts>>32) - uint32(pivot)))
+	sec := pivot + delta - ntpEpochOffset
 	frac := ts & 0xffffffff
 	nsec := (int64(frac) * 1e9) >> 32
 	return time.Unix(sec, nsec).UTC()

@@ -13,6 +13,7 @@ targets=(
   "darwin amd64"
   "darwin arm64"
   "windows amd64"
+  "windows arm64"
 )
 
 for target in "${targets[@]}"; do

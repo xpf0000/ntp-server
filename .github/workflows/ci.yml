@@ -2,41 +2,96 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: [main, master]
+    tags: ['v*']
   pull_request:
-    branches: ["main", "master"]
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test-and-build:
+  test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        go-version: ["1.26.x"]
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
         with:
-          go-version: ${{ matrix.go-version }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
           cache: true
+          cache-dependency-path: go.mod
 
       - name: Verify formatting
+        shell: bash
         run: |
-          UNFORMATTED=$(gofmt -l .)
-          if [ -n "$UNFORMATTED" ]; then
-            echo "gofmt required for:"
-            echo "$UNFORMATTED"
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            printf 'gofmt required for:\n%s\n' "$unformatted"
             exit 1
           fi
-        shell: bash
 
-      - name: Run tests
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Race test
+        if: runner.os == 'Linux'
         run: go test ./... -race -count=1
 
       - name: Build server
         run: go build ./cmd/ntp-server
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref_name }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: Build six platform binaries
+        shell: bash
+        run: bash scripts/build.sh "$RELEASE_TAG" dist/bin
+
+      - name: Package binaries and checksums
+        shell: bash
+        run: bash scripts/package-release.sh dist/bin dist/release
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(dist/release/ntp-server-*.zip dist/release/SHA256SUMS)
+          draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [[ "$draft" == false ]]; then
+            echo "Release $RELEASE_TAG already published"
+          elif [[ "$draft" == true ]]; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes
+          fi

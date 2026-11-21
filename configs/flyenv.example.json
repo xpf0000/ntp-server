@@ -1,0 +1,16 @@
+{
+  "clock": {
+    "mode": "real"
+  },
+  "ntp": {
+    "listenAddress": "127.0.0.1:12300",
+    "logRequests": false
+  },
+  "api": {
+    "enabled": false
+  },
+  "runtime": {
+    "logLevel": "INFO",
+    "logFile": "ntp.log"
+  }
+}

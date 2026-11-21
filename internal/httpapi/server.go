@@ -85,9 +85,10 @@ func (s *Server) authRequired(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	st := s.runtime.Status()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":     true,
-		"synced": st.Synced,
-		"time":   st.NowUTC,
+		"ok":        true,
+		"synced":    st.Synced,
+		"clockMode": st.ClockMode,
+		"time":      st.NowUTC,
 	})
 }
 

@@ -4,9 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -25,6 +27,7 @@ func main() {
 		configPath     string
 		printDefault   bool
 		printVersion   bool
+		checkConfig    bool
 		writeDefaultTo string
 	)
 
@@ -32,6 +35,7 @@ func main() {
 	flag.BoolVar(&printDefault, "print-default-config", false, "Print default config and exit")
 	flag.StringVar(&writeDefaultTo, "write-default-config", "", "Write default config to file and exit")
 	flag.BoolVar(&printVersion, "version", false, "Print version")
+	flag.BoolVar(&checkConfig, "check-config", false, "Validate configuration and exit")
 	flag.Parse()
 
 	if printVersion {
@@ -64,7 +68,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := newLogger(cfg.Runtime.LogLevel)
+	if checkConfig {
+		fmt.Println("Configuration OK")
+		return
+	}
+
+	var logOutput io.Writer = os.Stdout
+	if cfg.Runtime.LogFile != "" {
+		path := cfg.Runtime.LogFile
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(filepath.Dir(configPath), path)
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o640)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open log file %q: %v\n", path, err)
+			os.Exit(1)
+		}
+		defer file.Close()
+		logOutput = io.MultiWriter(os.Stdout, file)
+	}
+	logger := newLogger(cfg.Runtime.LogLevel, logOutput)
 	runtime.GOMAXPROCS(cfg.Runtime.GOMAXPROCS)
 	logger.Info("runtime configured", "gomaxprocs", cfg.Runtime.GOMAXPROCS)
 
@@ -111,7 +134,7 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-func newLogger(level string) *slog.Logger {
+func newLogger(level string, output io.Writer) *slog.Logger {
 	level = strings.ToUpper(strings.TrimSpace(level))
 	var lv slog.Level
 	switch level {
@@ -124,6 +147,6 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lv = slog.LevelInfo
 	}
-	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lv})
+	h := slog.NewTextHandler(output, &slog.HandlerOptions{Level: lv})
 	return slog.New(h)
 }

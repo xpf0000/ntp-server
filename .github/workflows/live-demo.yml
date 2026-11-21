@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   demo:
+    if: github.repository == 'aykutsp/ntp-server' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

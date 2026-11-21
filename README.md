@@ -294,6 +294,70 @@ Ports:
 
 ---
 
+## Local test clock and FlyEnv configuration
+
+The daemon runs in the foreground. It reads a JSON config at startup and logs to
+stdout. FlyEnv can keep `config.json` and `ntp.log` together in its plugin data
+directory, seed a new installation from [the FlyEnv example](configs/flyenv.example.json),
+launch the daemon with an absolute config path, and show the log through its
+standard Service and Logs views. The example listens only on localhost, uses
+port 12300, and records to a file next to the config.
+
+```bash
+ntp-server -write-default-config config.json
+ntp-server -config config.json -check-config
+ntp-server -config config.json
+```
+
+Run the first command to generate a config for a new installation. The check
+command validates values and exits before opening a port or log file. Save
+configuration changes and restart the service to apply them.
+
+### Time modes
+
+| `clock.mode` | Configuration | Served time |
+|---|---|---|
+| `real` | `"clock": {"mode": "real"}` | The existing time source and upstream synchronization settings. This is the default for earlier configs. |
+| `offset` | `"clock": {"mode": "offset", "offsetSeconds": 604800}` | The host's UTC clock plus a signed offset in seconds. This example advances time by seven days. |
+| `frozen` | `"clock": {"mode": "frozen", "frozenTime": "2038-01-19T20:00:00+08:00"}` | The same instant in every NTP reply. A timezone is required in the RFC 3339 timestamp. |
+
+A complete minimal local config for the frozen mode:
+
+```json
+{
+  "clock": {"mode": "frozen", "frozenTime": "2038-01-19T20:00:00+08:00"},
+  "ntp": {"listenAddress": "127.0.0.1:12300", "logRequests": true},
+  "api": {"enabled": false},
+  "runtime": {"logFile": "ntp.log"}
+}
+```
+
+The simulated modes send a local test reference (`SIMU`, stratum 10) and leave
+the system clock unchanged. They skip upstream polling. `/v1/status` reports the
+effective `nowUTC`, `clockMode` and `offsetMillis`. `synced` reports upstream
+synchronization. A system NTP client may still reject large jumps or repeated
+frozen timestamps. NTP timestamps are interpreted relative to the client's
+clock within an approximately 68-year window.
+
+### Logs
+
+The default `INFO` log shows startup, selected clock mode and upstream activity.
+Set `ntp.logRequests` to record answered requests with the client address and
+served timestamp while debugging. Leave it off for regular service use.
+Setting `runtime.logFile` also appends to the requested file. Relative paths are
+resolved next to the configuration file, and a file that cannot be opened is
+reported as a startup error. Leave `logFile` empty when a service manager
+already captures stdout.
+
+### Releases for FlyEnv
+
+A `v*` tag runs the native tests on Windows, macOS and Linux. A successful
+release builds ZIP assets for both AMD64 and ARM64 on all three systems and
+publishes `SHA256SUMS` with the archives. Each includes the daemon, both configuration
+examples and MIT license. FlyEnv can select the release asset by OS and CPU and
+verify the SHA-256 before installing it.
+
+
 ## Configuration
 
 Reference file: [`configs/server.example.json`](./configs/server.example.json)
